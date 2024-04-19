@@ -36,7 +36,7 @@ mod rcdom;
 use html5ever::interface::Attribute;
 use html5ever::serialize::{serialize, SerializeOpts};
 use html5ever::tree_builder::{NodeOrText, TreeSink};
-use html5ever::{driver as html, local_name, namespace_url, ns, QualName};
+use html5ever::{driver as html, expanded_name, local_name, namespace_url, ns, QualName};
 use maplit::{hashmap, hashset};
 use once_cell::sync::Lazy;
 use rcdom::{Handle, NodeData, RcDom, SerializableHandle};
@@ -1822,11 +1822,12 @@ impl<'a> Builder<'a> {
                     sub.parent.replace(Some(Rc::downgrade(&parent)));
                 }
             }
-            stack.extend(
-                mem::take(&mut *node.children.borrow_mut())
-                    .into_iter()
-                    .rev(),
-            );
+
+            let children = self
+                .extract_template_children(&node)
+                .unwrap_or(mem::take(&mut *node.children.borrow_mut()));
+
+            stack.extend(children.into_iter().rev());
             if !pass {
                 removed.push(node);
             }
@@ -1838,6 +1839,29 @@ impl<'a> Builder<'a> {
             removed.extend_from_slice(&mem::take(&mut *node.children.borrow_mut())[..]);
         }
         Document(dom)
+    }
+
+    fn extract_template_children(&self, node: &Handle) -> Option<Vec<Handle>> {
+        if let NodeData::Element {
+            name,
+            template_contents,
+            ..
+        } = &node.data
+        {
+            let is_template = name.expanded() == expanded_name!(html "template");
+            if is_template {
+                let template_contents = template_contents.borrow();
+                let mut children = template_contents
+                    .as_ref()
+                    .expect("template without contents")
+                    .children
+                    .borrow_mut();
+
+                return Some(mem::take(&mut *children));
+            }
+        }
+
+        None
     }
 
     /// Returns `true` if a node and all its content should be removed.
@@ -2926,6 +2950,33 @@ mod test {
         let fragment = "an <script>evil()</script> example";
         let result = clean(fragment);
         assert_eq!(result, "an  example");
+    }
+    #[test]
+    fn templates_are_cleaned_by_default() {
+        let fragment = "<template>safe</template>";
+        let result = Builder::new().clean(fragment).to_string();
+
+        assert_eq!(result, "");
+    }
+    #[test]
+    fn template_contents() {
+        let fragment = "<template>safe</template>";
+        let result = Builder::new()
+            .add_tags(&["template"])
+            .clean(fragment)
+            .to_string();
+
+        assert_eq!(result, "<template>safe</template>");
+    }
+    #[test]
+    fn template_contents_children_is_cleaned() {
+        let fragment = "<template><script>evil_stuff();</script></template>";
+        let result = Builder::new()
+            .add_tags(&["template"])
+            .clean(fragment)
+            .to_string();
+
+        assert_eq!(result, "<template></template>");
     }
     #[test]
     fn ignore_link() {
